@@ -2,7 +2,7 @@ name: Fork Sync
 
 on:
   schedule:
-    - cron: "0 22 * * *"     # 每天北京时间 06:00 执行
+    - cron: "0 19 */3 * *"     # 每 3 天北京时间 03:00 执行（UTC 19:00）
   workflow_dispatch:
 
 permissions:
@@ -42,7 +42,7 @@ jobs:
 
           if [ -n "${SYNC_PAT:-}" ]; then
             git remote set-url origin "https://x-access-token:${SYNC_PAT}@github.com/${{ github.repository }}.git"
-            echo "✅ 检测到 SYNC_PAT，将使用 PAT 推送（支持同步 .github/workflows）。"
+            echo "✅ 检测到 SYNC_PAT，将使用 PAT 推送。"
           else
             echo "⚠️ 未配置 SYNC_PAT，将使用默认 GITHUB_TOKEN。"
           fi
@@ -59,20 +59,40 @@ jobs:
           ORIGIN_SHA="$(git rev-parse origin/main)"
           UPSTREAM_SHA="$(git rev-parse upstream/main)"
 
-          if [ "${ORIGIN_SHA}" = "${UPSTREAM_SHA}" ]; then
-            echo "✨ Fork 已与上游完全一致，无需同步。"
+          # 备份本 fork 自定义的工作流配置（保留自定义的定时频率）
+          cp -r .github/workflows /tmp/workflows_custom
+
+          echo "🚀 正在拉取上游 main 最新提交..."
+          git reset --hard upstream/main
+
+          # 检查上游是否包含 workflow 变更
+          WORKFLOW_DIFF="$(git diff "${ORIGIN_SHA}" upstream/main -- .github/workflows || true)"
+
+          if [ -n "${WORKFLOW_DIFF}" ]; then
+            if [ -n "${SYNC_PAT:-}" ]; then
+              echo "ℹ️ 检测到上游工作流更新，已配置 SYNC_PAT，将同步上游工作流。"
+            else
+              echo "::notice title=Workflow update detected::上游更新了工作流文件。当前使用默认 GITHUB_TOKEN，将保留本 fork 现有工作流并同步其余所有应用代码。"
+              rm -rf .github/workflows
+              cp -r /tmp/workflows_custom .github/workflows
+            fi
+          else
+            # 上游工作流无变动，恢复本 fork 的自定义工作流配置
+            rm -rf .github/workflows
+            cp -r /tmp/workflows_custom .github/workflows
+          fi
+
+          # 如果工作流有修改，进行提交
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .github/workflows
+            git commit -m "chore(sync): sync upstream and retain custom workflows" || true
+          fi
+
+          NEW_LOCAL_SHA="$(git rev-parse HEAD)"
+          if [ "${ORIGIN_SHA}" = "${NEW_LOCAL_SHA}" ]; then
+            echo "✨ Fork 已与上游完全一致，无需推送。"
             exit 0
           fi
 
-          if [ -z "${SYNC_PAT:-}" ]; then
-            WORKFLOW_DIFF="$(git diff --name-only "${ORIGIN_SHA}" "${UPSTREAM_SHA}" -- .github/workflows || true)"
-            if [ -n "${WORKFLOW_DIFF}" ]; then
-              echo "::notice title=Fork Sync skipped::上游包含 workflow 文件变更，默认 GITHUB_TOKEN 不能创建或更新 workflow 文件。请在 fork 仓库配置 secret：SYNC_PAT（repo + workflow 权限）后手动重新运行，或在网页使用 Sync fork / Discard commits 对齐上游。"
-              exit 0
-            fi
-          fi
-
-          echo "🚀 正在镜像上游 main，fork 本地 main 上的额外提交会被丢弃。"
-          git reset --hard upstream/main
           git push --force-with-lease origin main
-          echo "✅ Fork main 已镜像到上游 main。"
+          echo "✅ Fork main 已成功同步上游最新代码！"
